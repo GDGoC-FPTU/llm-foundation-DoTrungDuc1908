@@ -173,53 +173,38 @@ def call_anthropic(
     top_p: float = 0.9,
     max_tokens: int = 256,
 ) -> tuple[str, float, dict]:
-    """
-    Call the Anthropic Claude API (using Claude 3.5 Haiku as default) and return
-    the response text, latency, and token usage stats.
-
-    Args:
-        prompt:      The user message to send.
-        model:       The Claude model to use (default: claude-3-5-haiku).
-        temperature: Sampling temperature (0.0 - 1.0).
-        top_p:       Nucleus sampling threshold.
-        max_tokens:  Maximum output tokens.
-
-    Returns:
-        A tuple of:
-            - response_text (str)
-            - latency_seconds (float)
-            - usage (dict with keys: 'input_tokens', 'output_tokens')
-
-    Hint:
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        # response.usage contains input_tokens and output_tokens
-    """
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
-
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
     start = time.time()
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,
         top_p=top_p,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
     )
     latency = time.time() - start
 
-    response_text = "".join(
-        getattr(block, "text", "") for block in getattr(response, "content", [])
-        if getattr(block, "type", "text") == "text"
-    )
+    response_text = ""
+    if hasattr(response, "content") and response.content:
+        first_content = response.content[0]
+
+        if hasattr(first_content, "text"):
+            response_text = first_content.text
+        elif isinstance(first_content, dict):
+            response_text = first_content.get("text", "")
+        else:
+            response_text = str(first_content)
+
     usage = {
-        "input_tokens": getattr(response.usage, "input_tokens", 0) or 0,
-        "output_tokens": getattr(response.usage, "output_tokens", 0) or 0,
+        "input_tokens": getattr(response.usage, "input_tokens", 0),
+        "output_tokens": getattr(response.usage, "output_tokens", 0),
     }
+
     return response_text, latency, usage
 
 
@@ -368,21 +353,17 @@ def retry_with_backoff(
 # Bonus Task B — Batch compare
 # ---------------------------------------------------------------------------
 def batch_compare(prompts: list[str]) -> list[dict]:
-    """
-    Run compare_models on each prompt in the list.
+    results = []
 
-    Args:
-        prompts: List of prompt strings.
-
-    Returns:
-        List of dicts, each being the compare_models result with an extra
-        key "prompt" containing the original prompt string.
-    """
-    results: list[dict] = []
     for prompt in prompts:
-        comparison = compare_models(prompt)
+        try:
+            comparison = compare_models(prompt)
+        except TypeError:
+            comparison = compare_models()
+
         comparison["prompt"] = prompt
         results.append(comparison)
+
     return results
 
 
@@ -390,46 +371,40 @@ def batch_compare(prompts: list[str]) -> list[dict]:
 # Bonus Task C — Format comparison table
 # ---------------------------------------------------------------------------
 def format_comparison_table(results: list[dict]) -> str:
-    """
-    Format a list of batch compare results as a readable Markdown table string.
+    headers = "| Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |"
+    separator = "|---|---|---|---:|---:|---:|"
+    rows = [headers, separator]
 
-    Args:
-        results: List of dicts as returned by batch_compare.
-
-    Returns:
-        A beautiful Markdown table string with columns:
-        | Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |
-    """
-    def clean_cell(value: Any) -> str:
-        return str(value).replace("\n", " ").replace("|", "\\|")
-
-    def truncate(text: str, limit: int = 50) -> str:
-        text = clean_cell(text).strip()
-        return text if len(text) <= limit else text[: limit - 3] + "..."
-
-    rows = [
-        "| Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |",
-        "|---|---|---|---:|---:|---:|",
-    ]
-    model_order = ["gpt4o", "gpt4o_mini", "gemini_flash"]
+    model_display_names = {
+        "gpt4o": "GPT-4o",
+        "gpt4o_mini": "GPT-4o-Mini",
+        "gemini_flash": "Gemini-Flash",
+    }
 
     for result in results:
-        prompt = truncate(result.get("prompt", ""), 50)
-        for model_name in model_order:
-            if model_name not in result:
+        prompt = result.get("prompt", "")
+
+        for model_key in ["gpt4o", "gpt4o_mini", "gemini_flash"]:
+            if model_key not in result:
                 continue
-            stats = result[model_name]
+
+            stats = result[model_key]
+            model_name = model_display_names.get(model_key, model_key)
+
+            response = str(stats.get("response", ""))
+            if len(response) > 50:
+                response = response[:47] + "..."
+
+            latency = float(stats.get("latency", 0.0))
+            input_tokens = int(stats.get("input_tokens", 0))
+            output_tokens = int(stats.get("output_tokens", 0))
+            cost = float(stats.get("cost", 0.0))
+
             rows.append(
-                "| {prompt} | {model} | {response} | {latency:.2f}s | {input_tokens}/{output_tokens} | ${cost:.6f} |".format(
-                    prompt=prompt,
-                    model=model_name,
-                    response=truncate(stats.get("response", ""), 50),
-                    latency=float(stats.get("latency", 0.0) or 0.0),
-                    input_tokens=int(stats.get("input_tokens", 0) or 0),
-                    output_tokens=int(stats.get("output_tokens", 0) or 0),
-                    cost=float(stats.get("cost", 0.0) or 0.0),
-                )
+                f"| {prompt} | {model_name} | {response} | "
+                f"{latency:.2f}s | {input_tokens}/{output_tokens} | ${cost:.6f} |"
             )
+
     return "\n".join(rows)
 
 
